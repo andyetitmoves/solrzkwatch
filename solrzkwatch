@@ -1,0 +1,68 @@
+#!/usr/bin/env python
+
+import logging
+import time
+import json
+import ConfigParser
+
+from kazoo.client import KazooClient
+
+logging.basicConfig(level='INFO')
+
+cfg_file = open('solrzkwatch.cfg')
+config = json.load(cfg_file)
+
+zk = KazooClient(hosts=config['zookeeper']['hosts'], timeout=1000)
+zk.start()
+
+def log_below_threshold(cfg, val, desc):
+    for level in ['critical', 'error', 'warning', 'info']:
+        if not level in cfg: continue
+        threshold = cfg[level]
+        if threshold is None or val <= threshold:
+            logfunc = getattr(logging, level)
+            if threshold is None: logfunc('%s: %s' % (desc, val))
+            else: logfunc('%s below threshold: %s <= %s' % (desc, val, threshold))
+            break
+
+def log_above_threshold(cfg, val, desc):
+    for level in ['critical', 'error', 'warning', 'info']:
+        if not level in cfg: continue
+        threshold = cfg[level]
+        if threshold is None or val >= threshold:
+            logfunc = getattr(logging, level)
+            if threshold is None: logfunc('%s: %s' % (desc, val))
+            else: logfunc('%s above threshold: %s >= %s' % (desc, val, threshold))
+            break
+
+@zk.DataWatch('/clusterstate.json')
+def watch_clusterstate(data, stat):
+    clconfig = config['clusterstate']
+    state = json.loads(data.decode('utf-8'))
+    for collection in state:
+        col_state = state[collection]
+        shards = col_state['shards']
+        for shard in shards:
+            shard_state = shards[shard]
+            if shard_state['state'] != 'active': pass
+            replicas = shard_state['replicas']
+            log_below_threshold(clconfig['log_min_replicas'],
+                                len(replicas), "Number of replicas for shard '" +
+                                shard + "' in collection '" + collection + "'")
+            for replica in replicas:
+                replica_state = replicas[replica]
+                if 'log_recovery_failed' in clconfig and \
+                   replica_state['state'] == 'recovery_failed':
+                    logfunc = getattr(logging, clconfig['log_recovery_failed'])
+                    logfunc('Recovery failed for collection: %s, shard: %s, replica: %s' % \
+                            (collection, shard, replica))
+
+@zk.ChildrenWatch('/overseer/queue')
+def watch_overseer_queue(children):
+    queue_size = len(children)
+    log_above_threshold(config['overseer']['log_queue_size'],
+                        queue_size, 'Overseer queue size')
+
+while True:
+    try: time.sleep(5)
+    except: break
