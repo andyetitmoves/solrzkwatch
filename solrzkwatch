@@ -3,7 +3,6 @@
 import logging
 import time
 import json
-import ConfigParser
 
 from kazoo.client import KazooClient
 
